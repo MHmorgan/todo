@@ -16,6 +16,7 @@ import (
 
 var (
 	help = flag.Bool("h", false, "show help")
+	// @TODO Support TODO_TAGS environment variable to override regex
 	re   = regexp.MustCompile(`^\s+(//|#|/?\*)\s+(@[A-Z]+) (.*)`)
 	home string
 )
@@ -28,7 +29,7 @@ func init() {
 	}
 }
 
-const USAGE = `Usage: todo [-v] [-h] [command]
+const USAGE = `Usage: todo [-h] [command]
 
 Look for TODOs in files.
 
