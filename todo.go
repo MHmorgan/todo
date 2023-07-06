@@ -15,7 +15,8 @@ import (
 )
 
 var (
-	help = flag.Bool("h", false, "show help")
+	help    = flag.Bool("h", false, "show help")
+	verbose = flag.Bool("v", false, "verbose output")
 	// @TODO Support TODO_TAGS environment variable to override regex
 	re   = regexp.MustCompile(`^\s+(//|#|/?\*)\s+(@[A-Z]+) (.*)`)
 	home string
@@ -29,7 +30,7 @@ func init() {
 	}
 }
 
-const USAGE = `Usage: todo [-h] [command]
+const USAGE = `Usage: todo [-h] [-v] [command]
 
 Look for TODOs in files.
 
@@ -53,7 +54,7 @@ func main() {
 
 	// Setup logging
 	logPath := filepath.Join(home, ".todo.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY, 0644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		bail("could not open log file: %v", logPath)
 	}
@@ -63,7 +64,7 @@ func main() {
 	// Find files to search
 	var wg sync.WaitGroup
 	dirs := targetDirectories()
-	log.Printf("Target directories: %v", dirs)
+	logf("Target directories: %v", dirs)
 	files := make(chan string, 42)
 	for _, dir := range dirs {
 		wg.Add(1)
@@ -74,15 +75,16 @@ func main() {
 	results := make(chan Result, 42)
 	go func() {
 		for file := range files {
-			wg.Add(1)
-			go searchFile(file, results, &wg)
+			if res := searchFile(file); res != nil {
+				results <- *res
+			}
 		}
+		close(results)
 	}()
 
 	go func() {
 		wg.Wait()
 		close(files)
-		close(results)
 	}()
 
 	for r := range results {
@@ -92,7 +94,7 @@ func main() {
 
 func findFiles(path string, files chan<- string, wg *sync.WaitGroup) {
 	defer wg.Done()
-	log.Printf("Searching directory %q", path)
+	logf("Searching directory %q", path)
 	filepath.Walk(path, func(path string, info fs.FileInfo, _ error) error {
 		if info.Mode().IsRegular() {
 			files <- path
@@ -123,14 +125,13 @@ func (sr Result) String() string {
 
 	var s strings.Builder
 	for _, todo := range sr.todos {
-		fmt.Fprintf(&s, "%s:%d: %s\n", name, todo.line, todo.text)
+		fmt.Fprintf(&s, "%-7s %s:%d: %s\n", todo.tag, name, todo.line, todo.text)
 	}
 	return s.String()
 }
 
-func searchFile(file string, res chan<- Result, wg *sync.WaitGroup) {
-	defer wg.Done()
-	log.Printf("Scanning file %q", file)
+func searchFile(file string) *Result {
+	logf("Scanning file %q", file)
 
 	f, err := os.Open(file)
 	if err != nil {
@@ -144,19 +145,20 @@ func searchFile(file string, res chan<- Result, wg *sync.WaitGroup) {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if m := re.FindStringSubmatch(line); len(m) > 0 {
-			log.Printf("Found todo: %q\n", m)
+			logf("Found todo: %q\n", m)
 			todos = append(todos, Todo{cnt, m[2], m[3]})
 		}
 		cnt++
 	}
 
 	if err := scanner.Err(); err != nil {
-		log.Printf("Error scanning file %q: %v", file, err)
+		logf("Error scanning file %q: %v", file, err)
 	}
 
 	if len(todos) > 0 {
-		res <- Result{file, todos}
+		return &Result{file, todos}
 	}
+	return nil
 }
 
 // -----------------------------------------------------------------------------
@@ -166,6 +168,17 @@ func bail(msg string, args ...any) {
 	s := fmt.Sprintf(msg, args...)
 	_, _ = fmt.Fprintln(os.Stderr, "ERROR: "+s)
 	os.Exit(1)
+}
+
+func logf(msg string, args ...any) {
+	txt := fmt.Sprintf(msg, args...)
+	if !strings.HasSuffix(txt, "\n") {
+		txt += "\n"
+	}
+	if *verbose {
+		fmt.Print(txt)
+	}
+	log.Print(txt)
 }
 
 func targetDirectories() []string {
@@ -183,6 +196,7 @@ func targetDirectories() []string {
 			return []string{dir}
 		}
 		dir, _ = path.Split(dir)
+		dir = strings.TrimSuffix(dir, "/")
 	}
 
 	val, ok := os.LookupEnv("TODO_PATH")
