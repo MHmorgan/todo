@@ -17,16 +17,26 @@ import (
 var (
 	help    = flag.Bool("h", false, "show help")
 	verbose = flag.Bool("v", false, "verbose output")
+
 	// @TODO Support TODO_TAGS environment variable to override regex
-	re   = regexp.MustCompile(`^\s+(//|#|/?\*)\s+(@[A-Z]+) (.*)`)
+	re = regexp.MustCompile(`^\s+(//|#|/?\*)\s+(@[A-Z]+) (.*)`)
+
 	home string
+
+	igoreDirs = []string{
+		".git",
+		".idea",
+		".vscode",
+		".gradle",
+		"venv",
+	}
 )
 
 func init() {
 	var err error
 	home, err = os.UserHomeDir()
 	if err != nil {
-		bail("could not get home directory")
+		fatalf("could not get home directory")
 	}
 }
 
@@ -56,35 +66,44 @@ func main() {
 	logPath := filepath.Join(home, ".todo.log")
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
-		bail("could not open log file: %v", logPath)
+		fatalf("could not open log file: %v", logPath)
 	}
 	defer logFile.Close()
 	log.SetOutput(logFile)
 
 	// Find files to search
-	var wg sync.WaitGroup
+	var dirsWG sync.WaitGroup
 	dirs := targetDirectories()
 	logf("Target directories: %v", dirs)
 	files := make(chan string, 42)
 	for _, dir := range dirs {
-		wg.Add(1)
-		go findFiles(dir, files, &wg)
+		dirsWG.Add(1)
+		go findFiles(dir, files, &dirsWG)
 	}
 
 	// Search files
+	var filesWG sync.WaitGroup
 	results := make(chan Result, 42)
-	go func() {
-		for file := range files {
-			if res := searchFile(file); res != nil {
-				results <- *res
+	for i := 0; i < 7; i++ {
+		filesWG.Add(1)
+		go func() {
+			for file := range files {
+				if res := searchFile(file); res != nil {
+					results <- *res
+				}
 			}
-		}
-		close(results)
+			filesWG.Done()
+		}()
+	}
+
+	go func() {
+		dirsWG.Wait()
+		close(files)
 	}()
 
 	go func() {
-		wg.Wait()
-		close(files)
+		filesWG.Wait()
+		close(results)
 	}()
 
 	for r := range results {
@@ -98,13 +117,21 @@ func findFiles(path string, files chan<- string, wg *sync.WaitGroup) {
 	filepath.Walk(path, func(path string, info fs.FileInfo, _ error) error {
 		if info.Mode().IsRegular() {
 			files <- path
+		} else if info.IsDir() {
+			for _, dir := range igoreDirs {
+				if m, err := filepath.Match(dir, info.Name()); err != nil {
+					panic(err)
+				} else if m {
+					return filepath.SkipDir
+				}
+			}
 		}
 		return nil
 	})
 }
 
 // -----------------------------------------------------------------------------
-// SEARCH
+// FILE SEARCH
 
 type Result struct {
 	file  string
@@ -135,7 +162,7 @@ func searchFile(file string) *Result {
 
 	f, err := os.Open(file)
 	if err != nil {
-		bail("could not open file: %v", file)
+		errorf("could not open file: %v", file)
 	}
 	defer f.Close()
 
@@ -152,7 +179,7 @@ func searchFile(file string) *Result {
 	}
 
 	if err := scanner.Err(); err != nil {
-		logf("Error scanning file %q: %v", file, err)
+		errorf("scanning file %q: %v", file, err)
 	}
 
 	if len(todos) > 0 {
@@ -164,10 +191,26 @@ func searchFile(file string) *Result {
 // -----------------------------------------------------------------------------
 // HELPERS
 
-func bail(msg string, args ...any) {
-	s := fmt.Sprintf(msg, args...)
-	_, _ = fmt.Fprintln(os.Stderr, "ERROR: "+s)
-	os.Exit(1)
+func fatalf(msg string, args ...any) {
+	txt := "ERROR: " + fmt.Sprintf(msg, args...)
+	if !strings.HasSuffix(txt, "\n") {
+		txt += "\n"
+	}
+	if *verbose {
+		fmt.Print(txt)
+	}
+	log.Fatal(txt)
+}
+
+func errorf(msg string, args ...any) {
+	txt := "ERROR: " + fmt.Sprintf(msg, args...)
+	if !strings.HasSuffix(txt, "\n") {
+		txt += "\n"
+	}
+	if *verbose {
+		fmt.Print(txt)
+	}
+	log.Print(txt)
 }
 
 func logf(msg string, args ...any) {
@@ -188,7 +231,7 @@ func targetDirectories() []string {
 
 	dir, err := os.Getwd()
 	if err != nil {
-		bail("could not get current working directory")
+		fatalf("could not get current working directory")
 	}
 
 	for dir != "" {
@@ -201,7 +244,7 @@ func targetDirectories() []string {
 
 	val, ok := os.LookupEnv("TODO_PATH")
 	if !ok {
-		bail("TODO_PATH not set")
+		fatalf("TODO_PATH not set")
 	}
 	return strings.Split(val, ":")
 }
